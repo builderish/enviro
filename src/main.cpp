@@ -1,105 +1,128 @@
-#include <Arduino.h>
-#include <Wire.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
-#include "Adafruit_SHT31.h"
+#include <ArduinoJson.h>
+#include <Adafruit_SHT31.h>
+#include "secrets.h"  // <-- contains WIFI_SSID, WIFI_PASS, MQTT_USER, MQTT_PASS
 
-// ================= CONFIG =================
+#define DEVICE_ID "esp32-001"
 
-// WiFi
-const char *ssid = "TDB";
-const char *password = "Tdb8954$";
+// HiveMQ Cloud broker config
+const int   MQTT_PORT   = 8883;  // TLS port
 
-// MQTT (NON-TLS)
-const char *mqtt_server = "broker.hivemq.com"; // public broker
-const int mqtt_port = 1883;
-const char *mqtt_user = nullptr;
-const char *mqtt_pass = nullptr;
+// MQTT topics
+const char* TOPIC_TELEMETRY = "devices/esp32-001/telemetry";
+const char* TOPIC_STATUS    = "devices/esp32-001/status";
 
-// ================= OBJECTS =================
+// Timing
+const unsigned long PUBLISH_INTERVAL = 30000; // 30 seconds
+unsigned long lastPublish = 0;
 
-WiFiClient espClient;
+// Objects
+WiFiClientSecure espClient;
 PubSubClient mqtt(espClient);
 Adafruit_SHT31 sht31 = Adafruit_SHT31();
 
-// ================= FUNCTIONS =================
-
-void connectWiFi()
-{
-    Serial.print("Connecting WiFi");
-    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED)
-    {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println("\nWiFi connected");
+// ==========================
+// Helper: publish JSON
+// ==========================
+void publishJson(const char* topic, JsonDocument& doc) {
+  char buffer[256];
+  size_t len = serializeJson(doc, buffer);
+  mqtt.publish(topic, buffer, len);
+  Serial.println(buffer); // mirror MQTT payload to serial
 }
 
-void connectMQTT()
-{
-    while (!mqtt.connected())
-    {
-        Serial.print("Connecting MQTT...");
-        if (mqtt.connect("esp32-enviro"))
-        {
-            Serial.println("connected");
-        }
-        else
-        {
-            Serial.print("failed rc=");
-            Serial.println(mqtt.state());
-            delay(2000);
-        }
-    }
+// ==========================
+// Connect Wi-Fi
+// ==========================
+void connectWiFi() {
+  Serial.print("Connecting to WiFi...");
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi connected");
+
+  StaticJsonDocument<128> doc;
+  doc["deviceId"] = DEVICE_ID;
+  doc["ts"] = millis();
+  doc["status"] = "wifi_connected";
+  publishJson(TOPIC_STATUS, doc);
 }
 
-// ================= SETUP =================
+// ==========================
+// Connect MQTT
+// ==========================
+void connectMQTT() {
+  mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+  espClient.setInsecure(); // Accept self-signed certificate (HiveMQ Cloud)
 
-void setup()
-{
-    Serial.begin(115200);
-    Wire.begin();
+  while (!mqtt.connected()) {
+    Serial.print("Connecting to MQTT Cloud... ");
+    if (mqtt.connect(DEVICE_ID, MQTT_USER, MQTT_PASS)) {
+      Serial.println("connected");
 
-    connectWiFi();
+      StaticJsonDocument<128> doc;
+      doc["deviceId"] = DEVICE_ID;
+      doc["ts"] = millis();
+      doc["status"] = "mqtt_connected";
+      publishJson(TOPIC_STATUS, doc);
 
-    mqtt.setServer(mqtt_server, mqtt_port);
-
-    if (!sht31.begin(0x44))
-    {
-        Serial.println("SHT31 NOT FOUND");
-        while (1)
-            delay(10);
+    } else {
+      Serial.print("failed, rc=");
+      Serial.println(mqtt.state());
+      delay(3000);
     }
-
-    Serial.println("SHT31 OK");
+  }
 }
 
-// ================= LOOP =================
+// ==========================
+// SETUP
+// ==========================
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
 
-void loop()
-{
-    if (!mqtt.connected())
-        connectMQTT();
-    mqtt.loop();
+  if (!sht31.begin(0x44)) {
+    Serial.println("SHT31 not found!");
+    while (1) delay(1);
+  }
 
-    float t = sht31.readTemperature();
-    float h = sht31.readHumidity();
+  connectWiFi();
+  connectMQTT();
+}
 
-    if (!isnan(t) && !isnan(h))
-    {
-        char payload[64];
-        snprintf(payload, sizeof(payload),
-                 "{\"temperature\":%.2f,\"humidity\":%.2f}", t, h);
+// ==========================
+// LOOP
+// ==========================
+void loop() {
+  if (!mqtt.connected()) {
+    connectMQTT();
+  }
 
-        mqtt.publish("esp32/sensors", payload);
+  mqtt.loop();
 
-        Serial.println(payload);
+  unsigned long now = millis();
+  if (now - lastPublish >= PUBLISH_INTERVAL) {
+    lastPublish = now;
+
+    float temp = sht31.readTemperature();
+    float humidity = sht31.readHumidity();
+
+    if (!isnan(temp) && !isnan(humidity)) {
+      StaticJsonDocument<256> doc;
+      doc["deviceId"] = DEVICE_ID;
+      doc["ts"] = millis();
+      doc["temp"] = temp;
+      doc["humidity"] = humidity;
+
+      publishJson(TOPIC_TELEMETRY, doc);
+    } else {
+      Serial.println("Sensor read failed");
     }
-    else
-    {
-        Serial.println("Sensor read failed");
-    }
-
-    delay(2000);
+  }
 }
