@@ -7,7 +7,7 @@
 
 
 #### WIFI CONFIG
-** all sensative data is excpected in a secrets.h ie. credentials and wifi access **
+**all sensative data is excpected in a secrets.h ie. credentials and wifi access**
 
 
 
